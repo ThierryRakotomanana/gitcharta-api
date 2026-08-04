@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,11 @@ func main() {
 		port = "8080"
 	}
 
+	tokensRaw := os.Getenv("GITHUB_TOKENS")
+	if tokensRaw == "" {
+		log.Println("Warning: GITHUB_TOKENS env var empty")
+	}
+	tokens := strings.Split(tokensRaw, ",")
 
 	server := &http.Server{
 		Addr:         ":" + port,
