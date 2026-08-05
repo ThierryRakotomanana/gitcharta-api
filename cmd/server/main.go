@@ -5,29 +5,32 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
+
+	githubaudience "githubaudience"
 )
 
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
 	tokensRaw := os.Getenv("GITHUB_TOKENS")
 	if tokensRaw == "" {
-		log.Println("Warning: GITHUB_TOKENS env var empty")
+		log.Fatal("GITHUB_TOKENS environment variable is required (comma-separated list of GitHub tokens)")
 	}
-	tokens := strings.Split(tokensRaw, ",")
-
-	server := &http.Server{
-		Addr:         ":" + port,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 60 * time.Second,
+	pool, err := githubaudience.NewTokenPool(strings.Split(tokensRaw, ","))
+	if err != nil {
+		log.Fatalf("failed to build token pool: %v", err)
 	}
+	log.Printf("token pool ready with %d token(s)", pool.Size())
 
-	log.Printf("Server listening on port %s...", port)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("Server failed: %v", err)
+	server := githubaudience.NewServer(pool)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/audience", server.HandleAudience)
+
+	addr := os.Getenv("ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+	log.Printf("listening on %s", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Fatal(err)
 	}
 }
