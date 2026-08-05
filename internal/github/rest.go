@@ -14,7 +14,7 @@ import (
 
 const githubRESTBaseURL = "https://api.github.com"
 
-const BackfillConcurrency = 40
+const BackfillConcurrency = 20
 
 type RESTClient struct {
 	HTTPClient *http.Client

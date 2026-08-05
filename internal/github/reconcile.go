@@ -7,7 +7,6 @@ import (
 
 const progressChunk = 20
 
-// FetchAllAudienceReconciled is the Go equivalent of fetchAllAudienceReconciled.
 func FetchAllAudienceReconciled(
 	ctx context.Context,
 	graphqlClient *GraphQLClient,
@@ -93,7 +92,6 @@ func FetchAllAudienceReconciled(
 	}, nil
 }
 
-// EstimateReconciliationCost is the Go equivalent of estimateReconciliationCost.
 func EstimateReconciliationCost(audienceCount int) ReconciliationCostEstimate {
 	pages := int(math.Ceil(float64(audienceCount) / githubMaxPageSize))
 	if pages < 1 {
