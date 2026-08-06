@@ -3,28 +3,50 @@ package jobs
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"sync"
 	"time"
 
 	"githubaudience/internal/model"
 )
 
+var ErrTooManyJobs = errors.New("too many jobs in flight; try again shortly")
+
+const defaultMaxConcurrentJobs = 10
+
 type JobStore struct {
-	mu   sync.RWMutex
-	jobs map[string]*model.AudienceJob
+	mu            sync.RWMutex
+	jobs          map[string]*model.AudienceJob
+	maxConcurrent int
+	active        int
 }
 
-func NewJobStore() *JobStore {
+func NewJobStore(maxConcurrent int) *JobStore {
+	if maxConcurrent <= 0 {
+		maxConcurrent = defaultMaxConcurrentJobs
+	}
 	store := &JobStore{
-		jobs: make(map[string]*model.AudienceJob),
+		jobs:          make(map[string]*model.AudienceJob),
+		maxConcurrent: maxConcurrent,
 	}
 	go store.startCleanupLoop(1 * time.Hour)
 	return store
 }
 
 func (s *JobStore) Create(login string, audienceType model.AudienceType) (*model.AudienceJob, error) {
+	s.mu.Lock()
+	if s.active >= s.maxConcurrent {
+		s.mu.Unlock()
+		return nil, ErrTooManyJobs
+	}
+	s.active++
+	s.mu.Unlock()
+
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
+		s.mu.Lock()
+		s.active--
+		s.mu.Unlock()
 		return nil, err
 	}
 	id := hex.EncodeToString(b)
@@ -70,9 +92,16 @@ func (s *JobStore) Complete(id string, result model.ReconciledAudienceResult) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if job, exists := s.jobs[id]; exists {
-		job.Status = model.StatusCompleted
+		if result.Partial {
+			job.Status = model.StatusPartial
+		} else {
+			job.Status = model.StatusCompleted
+		}
 		job.Result = &result
 		job.UpdatedAt = time.Now()
+		if s.active > 0 {
+			s.active--
+		}
 	}
 }
 
@@ -83,6 +112,9 @@ func (s *JobStore) Fail(id string, err error) {
 		job.Status = model.StatusFailed
 		job.Error = err.Error()
 		job.UpdatedAt = time.Now()
+		if s.active > 0 {
+			s.active--
+		}
 	}
 }
 
@@ -93,6 +125,11 @@ func (s *JobStore) startCleanupLoop(ttl time.Duration) {
 		now := time.Now()
 		for id, job := range s.jobs {
 			if now.Sub(job.UpdatedAt) > ttl {
+				if job.Status == model.StatusPending || job.Status == model.StatusRunning {
+					if s.active > 0 {
+						s.active--
+					}
+				}
 				delete(s.jobs, id)
 			}
 		}
