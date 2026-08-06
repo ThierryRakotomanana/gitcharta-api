@@ -17,7 +17,6 @@ import (
 const (
 	githubGraphQLURL  = "https://api.github.com/graphql"
 	githubMaxPageSize = 100
-	quotaBufferRatio  = 0.02
 )
 
 type UserProfile struct {
@@ -49,15 +48,13 @@ type CostEstimate struct {
 type PaginationRateLimitError struct {
 	ResetAt      time.Time
 	PartialNodes []model.ProfileNode
+	TotalCount   int
 }
 
 func (e *PaginationRateLimitError) Error() string { return "pagination interrupted by rate limit" }
 
 func quotaBuffer(rl model.RateLimit) int {
-	if b := int(math.Ceil(float64(rl.Limit) * quotaBufferRatio)); b > 1 {
-		return b
-	}
-	return 1
+	return computeQuotaBuffer(rl.Limit)
 }
 
 func isQuotaLow(rl model.RateLimit) bool {
@@ -95,7 +92,16 @@ query UserProfile($login: String!) {
 	` + rateLimitFields + `
 }`
 
-func audienceQuery(audienceType model.AudienceType) string {
+func audienceQuery(audienceType model.AudienceType) (string, error) {
+	var field string
+	switch audienceType {
+	case model.AudienceFollowers:
+		field = "followers"
+	case model.AudienceFollowing:
+		field = "following"
+	default:
+		return "", &model.GithubAPIError{Msg: fmt.Sprintf("unsupported audience type: %q", audienceType), Status: http.StatusBadRequest}
+	}
 	return fmt.Sprintf(`%s
 query AudiencePage($login: String!, $first: Int!, $after: String) {
 	user(login: $login) {
@@ -107,7 +113,7 @@ query AudiencePage($login: String!, $first: Int!, $after: String) {
 		}
 	}
 	%s
-}`, profileFragment, audienceType, rateLimitFields)
+}`, profileFragment, field, rateLimitFields), nil
 }
 
 type profileFieldsData struct {
@@ -180,7 +186,7 @@ type GraphQLClient struct {
 
 func NewGraphQLClient(httpClient *http.Client) *GraphQLClient {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = &http.Client{Timeout: 30 * time.Second, Transport: DefaultTransport()}
 	}
 	return &GraphQLClient{HTTPClient: httpClient}
 }
@@ -239,13 +245,18 @@ func doGraphQL[T any](ctx context.Context, client *GraphQLClient, token, query s
 }
 
 func classifyGraphQLRateLimitError(err error) (time.Time, bool) {
-	var apiErr *model.GithubAPIError
-	if errors.As(err, &apiErr) && (apiErr.Status == 403 || apiErr.Status == 429) {
-		return resetAtFromHeaders(apiErr.Headers), true // Ensure resetAtFromHeaders exists in tokenpool.go
-	}
 	var rl *rateLimitedGraphQLError
 	if errors.As(err, &rl) {
 		return time.Now().Add(60 * time.Second), true
+	}
+	var apiErr *model.GithubAPIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Status {
+		case 429:
+			return resetAtFromHeaders(apiErr.Headers), true
+		case 403:
+			return classifyForbidden(http.Header(apiErr.Headers))
+		}
 	}
 	return time.Time{}, false
 }
@@ -254,7 +265,7 @@ func wrapErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	var exhausted *model.AllTokensExhaustedError
+	var exhausted *AllTokensExhaustedError
 	if errors.As(err, &exhausted) {
 		return err
 	}
@@ -274,7 +285,7 @@ func FetchUserProfile(ctx context.Context, client *GraphQLClient, pool *TokenPoo
 		pool.Report(token, d.RateLimit.Remaining, d.RateLimit.Limit, d.RateLimit.Reset)
 		return d, nil
 	}, classifyGraphQLRateLimitError)
-	
+
 	if err != nil {
 		return UserProfile{}, model.RateLimit{}, wrapErr(err)
 	}
@@ -308,7 +319,10 @@ func FetchAudiencePage(ctx context.Context, client *GraphQLClient, pool *TokenPo
 	if first > githubMaxPageSize {
 		first = githubMaxPageSize
 	}
-	query := audienceQuery(audienceType)
+	query, err := audienceQuery(audienceType)
+	if err != nil {
+		return AudiencePageResult{}, err
+	}
 
 	data, err := withTokenRotation(pool, func(token string) (audienceQueryData, error) {
 		d, err := doGraphQL[audienceQueryData](ctx, client, token, query, map[string]any{
@@ -322,7 +336,7 @@ func FetchAudiencePage(ctx context.Context, client *GraphQLClient, pool *TokenPo
 		pool.Report(token, d.RateLimit.Remaining, d.RateLimit.Limit, d.RateLimit.Reset)
 		return d, nil
 	}, classifyGraphQLRateLimitError)
-	
+
 	if err != nil {
 		return AudiencePageResult{}, wrapErr(err)
 	}
@@ -347,13 +361,13 @@ func FetchAllAudience(ctx context.Context, client *GraphQLClient, pool *TokenPoo
 	for {
 		page, err := FetchAudiencePage(ctx, client, pool, login, audienceType, AudiencePageOptions{After: after})
 		if err != nil {
-			var exhausted *model.AllTokensExhaustedError
+			var exhausted *AllTokensExhaustedError
 			if errors.As(err, &exhausted) {
 				nodes := make([]model.ProfileNode, 0, len(order))
 				for _, id := range order {
 					nodes = append(nodes, collected[id])
 				}
-				return AllAudienceResult{}, &PaginationRateLimitError{ResetAt: exhausted.ResetsAt, PartialNodes: nodes}
+				return AllAudienceResult{}, &PaginationRateLimitError{ResetAt: exhausted.ResetAt, PartialNodes: nodes, TotalCount: totalCount}
 			}
 			return AllAudienceResult{}, err
 		}
@@ -365,7 +379,7 @@ func FetchAllAudience(ctx context.Context, client *GraphQLClient, pool *TokenPoo
 			collected[node.ID] = node
 		}
 		totalCount = page.Audience.TotalCount
-		
+
 		if onProgress != nil {
 			onProgress(len(collected), totalCount)
 		}
