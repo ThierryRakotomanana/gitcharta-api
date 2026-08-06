@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
+	"runtime/debug"
 	"time"
 
 	"githubaudience/internal/github"
@@ -20,7 +23,10 @@ type Server struct {
 }
 
 func NewServer(pool *github.TokenPool, jobsStore *jobs.JobStore) *Server {
-	httpClient := &http.Client{Timeout: 60 * time.Second}
+	httpClient := &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: github.DefaultTransport(),
+	}
 	return &Server{
 		GraphQL: github.NewGraphQLClient(httpClient),
 		REST:    github.NewRESTClient(httpClient),
@@ -67,6 +73,13 @@ func (s *Server) HandleCreateAudienceJob(w http.ResponseWriter, r *http.Request)
 	}
 
 	go func(jobID, login string, audType model.AudienceType) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("panic in audience job %s: %v\n%s", jobID, r, debug.Stack())
+				s.Jobs.Fail(jobID, fmt.Errorf("internal error while processing job"))
+			}
+		}()
+
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 		defer cancel()
 
