@@ -121,18 +121,22 @@ func (s *JobStore) Fail(id string, err error) {
 func (s *JobStore) startCleanupLoop(ttl time.Duration) {
 	ticker := time.NewTicker(15 * time.Minute)
 	for range ticker.C {
-		s.mu.Lock()
-		now := time.Now()
-		for id, job := range s.jobs {
-			if now.Sub(job.UpdatedAt) > ttl {
-				if job.Status == model.StatusPending || job.Status == model.StatusRunning {
-					if s.active > 0 {
-						s.active--
-					}
+		s.cleanupOnce(ttl)
+	}
+}
+
+func (s *JobStore) cleanupOnce(ttl time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for id, job := range s.jobs {
+		if now.Sub(job.UpdatedAt) > ttl {
+			if job.Status == model.StatusPending || job.Status == model.StatusRunning {
+				if s.active > 0 {
+					s.active--
 				}
-				delete(s.jobs, id)
 			}
+			delete(s.jobs, id)
 		}
-		s.mu.Unlock()
 	}
 }
