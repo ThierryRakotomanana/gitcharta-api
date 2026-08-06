@@ -23,7 +23,10 @@ type Server struct {
 }
 
 func NewServer(pool *github.TokenPool, jobsStore *jobs.JobStore) *Server {
-	httpClient := &http.Client{Timeout: 60 * time.Second}
+	httpClient := &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: github.DefaultTransport(),
+	}
 	return &Server{
 		GraphQL: github.NewGraphQLClient(httpClient),
 		REST:    github.NewRESTClient(httpClient),
