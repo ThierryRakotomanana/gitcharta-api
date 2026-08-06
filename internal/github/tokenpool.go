@@ -3,14 +3,10 @@ package github
 import (
 	"errors"
 	"fmt"
-	"math"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
-
-const lowQuotaRatio = 0.02
 
 type tokenState struct {
 	token     string
@@ -62,9 +58,7 @@ func isUsable(s *tokenState, now time.Time) bool {
 	}
 	buffer := 1
 	if s.limit != nil {
-		if b := int(math.Ceil(float64(*s.limit) * lowQuotaRatio)); b > buffer {
-			buffer = b
-		}
+		buffer = computeQuotaBuffer(*s.limit)
 	}
 	if *s.remaining > buffer {
 		return true
@@ -153,26 +147,4 @@ func withTokenRotation[T any](pool *TokenPool, fn func(token string) (T, error),
 		pool.MarkExhausted(token, resetAt)
 		tried[token] = true
 	}
-}
-
-func resetAtFromHeaders(headers map[string][]string) time.Time {
-	get := func(key string) string {
-		for k, v := range headers {
-			if strings.EqualFold(k, key) && len(v) > 0 {
-				return v[0]
-			}
-		}
-		return ""
-	}
-	if ra := get("Retry-After"); ra != "" {
-		if secs, err := strconv.Atoi(ra); err == nil {
-			return time.Now().Add(time.Duration(secs) * time.Second)
-		}
-	}
-	if rr := get("X-RateLimit-Reset"); rr != "" {
-		if unix, err := strconv.ParseInt(rr, 10, 64); err == nil {
-			return time.Unix(unix, 0)
-		}
-	}
-	return time.Now().Add(60 * time.Second)
 }
