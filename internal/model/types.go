@@ -1,4 +1,4 @@
-package githubaudience
+package model
 
 import (
 	"fmt"
@@ -28,35 +28,6 @@ type ProfileNode struct {
 	IsSiteAdmin     bool    `json:"isSiteAdmin"`
 }
 
-type PageInfo struct {
-	HasNextPage bool    `json:"hasNextPage"`
-	EndCursor   *string `json:"endCursor"`
-}
-
-type AudienceConnection struct {
-	TotalCount int           `json:"totalCount"`
-	PageInfo   PageInfo      `json:"pageInfo"`
-	Nodes      []ProfileNode `json:"nodes"`
-}
-
-type RateLimit struct {
-	Limit     int       `json:"limit"`
-	Cost      int       `json:"cost"`
-	Remaining int       `json:"remaining"`
-	ResetAt   time.Time `json:"resetAt"`
-}
-
-type UserProfile struct {
-	ProfileNode
-	FollowersCount int `json:"followersCount"`
-	FollowingCount int `json:"followingCount"`
-}
-
-type AllAudienceResult struct {
-	Nodes      []ProfileNode
-	TotalCount int
-}
-
 type ReconcileStage string
 
 const (
@@ -75,16 +46,31 @@ type ReconciledAudienceResult struct {
 	UnresolvedLogins  []string      `json:"unresolvedLogins"`
 }
 
-type CostEstimate struct {
-	PointsNeeded int  `json:"pointsNeeded"`
-	Remaining    int  `json:"remaining"`
-	WillExceed   bool `json:"willExceed"`
+type JobStatus string
+
+const (
+	StatusPending   JobStatus = "pending"
+	StatusRunning   JobStatus = "running"
+	StatusCompleted JobStatus = "completed"
+	StatusFailed    JobStatus = "failed"
+)
+
+type JobProgress struct {
+	Stage ReconcileStage `json:"stage"`
+	Done  int            `json:"done"`
+	Total *int           `json:"total"`
 }
 
-type ReconciliationCostEstimate struct {
-	GraphQLPoints          int `json:"graphqlPoints"`
-	RESTRequests           int `json:"restRequests"`
-	WorstCaseBackfillPoint int `json:"worstCaseBackfillPoints"`
+type AudienceJob struct {
+	ID        string                    `json:"id"`
+	Status    JobStatus                 `json:"status"`
+	Login     string                    `json:"login"`
+	Type      AudienceType              `json:"type"`
+	Progress  JobProgress               `json:"progress"`
+	Result    *ReconciledAudienceResult `json:"result,omitempty"`
+	Error     string                    `json:"error,omitempty"`
+	CreatedAt time.Time                 `json:"createdAt"`
+	UpdatedAt time.Time                 `json:"updatedAt"`
 }
 
 type GithubAPIError struct {
@@ -95,11 +81,24 @@ type GithubAPIError struct {
 
 func (e *GithubAPIError) Error() string { return e.Msg }
 
+type RateLimit struct {
+	Limit     int
+	Remaining int
+	Reset     time.Time
+}
+
 type RateLimitError struct {
-	ResetAt      time.Time
-	PartialNodes []ProfileNode
+	Limit RateLimit
 }
 
 func (e *RateLimitError) Error() string {
-	return fmt.Sprintf("rate limit exceeded, resets at %s", e.ResetAt.Format(time.Kitchen))
+	return fmt.Sprintf("rate limit exceeded, resets at %v", e.Limit.Reset)
+}
+
+type AllTokensExhaustedError struct {
+	ResetsAt time.Time
+}
+
+func (e *AllTokensExhaustedError) Error() string {
+	return fmt.Sprintf("all tokens exhausted, earliest reset at %v", e.ResetsAt)
 }

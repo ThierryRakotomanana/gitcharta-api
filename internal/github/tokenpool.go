@@ -1,4 +1,4 @@
-package githubaudience
+package github
 
 import (
 	"errors"

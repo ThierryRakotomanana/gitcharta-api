@@ -6,31 +6,38 @@ import (
 	"os"
 	"strings"
 
-	githubaudience "githubaudience"
+	"githubaudience/internal/api"
+	"githubaudience/internal/github"
+	"githubaudience/internal/jobs"
 )
 
 func main() {
-	tokensRaw := os.Getenv("GITHUB_TOKENS")
-	if tokensRaw == "" {
-		log.Fatal("GITHUB_TOKENS environment variable is required (comma-separated list of GitHub tokens)")
+	rawTokens := os.Getenv("GITHUB_TOKENS")
+	if rawTokens == "" {
+		log.Fatal("GITHUB_TOKENS environment variable is required")
 	}
-	pool, err := githubaudience.NewTokenPool(strings.Split(tokensRaw, ","))
+	pool, err := github.NewTokenPool(strings.Split(rawTokens, ","))
 	if err != nil {
 		log.Fatalf("failed to build token pool: %v", err)
 	}
-	log.Printf("token pool ready with %d token(s)", pool.Size())
 
-	server := githubaudience.NewServer(pool)
+	jobStore := jobs.NewJobStore()
+	server := api.NewServer(pool, jobStore)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/audience", server.HandleAudience)
+	mux.HandleFunc("POST /api/audience/jobs", server.HandleCreateAudienceJob)
+	mux.HandleFunc("GET /api/audience/jobs/{id}", server.HandleGetAudienceJob)
+
+	allowedOrigins := strings.Split(os.Getenv("CORS_ALLOWED_ORIGINS"), ",")
+	handler := api.CORSMiddleware(allowedOrigins)(mux)
 
 	addr := os.Getenv("ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
-	log.Printf("listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+
+	log.Printf("server listening on %s", addr)
+	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatal(err)
 	}
 }

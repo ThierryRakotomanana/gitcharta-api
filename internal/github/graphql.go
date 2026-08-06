@@ -1,4 +1,4 @@
-package githubaudience
+package github
 
 import (
 	"bytes"
@@ -10,6 +10,8 @@ import (
 	"math"
 	"net/http"
 	"time"
+
+	"githubaudience/internal/model"
 )
 
 const (
@@ -18,14 +20,47 @@ const (
 	quotaBufferRatio  = 0.02
 )
 
-func quotaBuffer(rl RateLimit) int {
+type UserProfile struct {
+	ProfileNode    model.ProfileNode
+	FollowersCount int
+	FollowingCount int
+}
+
+type AudienceConnection struct {
+	TotalCount int `json:"totalCount"`
+	PageInfo   struct {
+		HasNextPage bool    `json:"hasNextPage"`
+		EndCursor   *string `json:"endCursor"`
+	} `json:"pageInfo"`
+	Nodes []model.ProfileNode `json:"nodes"`
+}
+
+type AllAudienceResult struct {
+	Nodes      []model.ProfileNode
+	TotalCount int
+}
+
+type CostEstimate struct {
+	PointsNeeded int
+	Remaining    int
+	WillExceed   bool
+}
+
+type PaginationRateLimitError struct {
+	ResetAt      time.Time
+	PartialNodes []model.ProfileNode
+}
+
+func (e *PaginationRateLimitError) Error() string { return "pagination interrupted by rate limit" }
+
+func quotaBuffer(rl model.RateLimit) int {
 	if b := int(math.Ceil(float64(rl.Limit) * quotaBufferRatio)); b > 1 {
 		return b
 	}
 	return 1
 }
 
-func isQuotaLow(rl RateLimit) bool {
+func isQuotaLow(rl model.RateLimit) bool {
 	return rl.Remaining <= quotaBuffer(rl)
 }
 
@@ -60,7 +95,7 @@ query UserProfile($login: String!) {
 	` + rateLimitFields + `
 }`
 
-func audienceQuery(audienceType AudienceType) string {
+func audienceQuery(audienceType model.AudienceType) string {
 	return fmt.Sprintf(`%s
 query AudiencePage($login: String!, $first: Int!, $after: String) {
 	user(login: $login) {
@@ -87,8 +122,8 @@ type profileFieldsData struct {
 	IsSiteAdmin     bool    `json:"isSiteAdmin"`
 }
 
-func (p profileFieldsData) toNode() ProfileNode {
-	return ProfileNode{
+func (p profileFieldsData) toNode() model.ProfileNode {
+	return model.ProfileNode{
 		Login:           p.Login,
 		ID:              p.ID,
 		Name:            p.Name,
@@ -111,7 +146,7 @@ type userProfileQueryData struct {
 			TotalCount int `json:"totalCount"`
 		} `json:"following"`
 	} `json:"user"`
-	RateLimit RateLimit `json:"rateLimit"`
+	RateLimit model.RateLimit `json:"rateLimit"`
 }
 
 type audienceQueryData struct {
@@ -120,11 +155,11 @@ type audienceQueryData struct {
 		Followers *AudienceConnection `json:"followers,omitempty"`
 		Following *AudienceConnection `json:"following,omitempty"`
 	} `json:"user"`
-	RateLimit RateLimit `json:"rateLimit"`
+	RateLimit model.RateLimit `json:"rateLimit"`
 }
 
-func (d audienceQueryData) connection(audienceType AudienceType) *AudienceConnection {
-	if audienceType == AudienceFollowers {
+func (d audienceQueryData) connection(audienceType model.AudienceType) *AudienceConnection {
+	if audienceType == model.AudienceFollowers {
 		return d.User.Followers
 	}
 	return d.User.Following
@@ -173,12 +208,12 @@ func doGraphQL[T any](ctx context.Context, client *GraphQLClient, token, query s
 
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
-		return zero, &GithubAPIError{Msg: "Invalid or expired GitHub token.", Status: 401, Headers: resp.Header}
+		return zero, &model.GithubAPIError{Msg: "Invalid or expired GitHub token.", Status: 401, Headers: resp.Header}
 	case http.StatusForbidden:
-		return zero, &GithubAPIError{Msg: "GitHub API rate limit exceeded.", Status: 403, Headers: resp.Header}
+		return zero, &model.GithubAPIError{Msg: "GitHub API rate limit exceeded.", Status: 403, Headers: resp.Header}
 	}
 	if resp.StatusCode >= 400 {
-		return zero, &GithubAPIError{Msg: fmt.Sprintf("GitHub API error: %d", resp.StatusCode), Status: resp.StatusCode, Headers: resp.Header}
+		return zero, &model.GithubAPIError{Msg: fmt.Sprintf("GitHub API error: %d", resp.StatusCode), Status: resp.StatusCode, Headers: resp.Header}
 	}
 
 	var parsed struct {
@@ -192,21 +227,21 @@ func doGraphQL[T any](ctx context.Context, client *GraphQLClient, token, query s
 	for _, e := range parsed.Errors {
 		switch e.Type {
 		case "NOT_FOUND":
-			return zero, &GithubAPIError{Msg: "user not found", Status: 404}
+			return zero, &model.GithubAPIError{Msg: "user not found", Status: 404}
 		case "RATE_LIMITED":
 			return zero, &rateLimitedGraphQLError{}
 		}
 	}
 	if len(parsed.Errors) > 0 {
-		return zero, &GithubAPIError{Msg: parsed.Errors[0].Message}
+		return zero, &model.GithubAPIError{Msg: parsed.Errors[0].Message}
 	}
 	return parsed.Data, nil
 }
 
 func classifyGraphQLRateLimitError(err error) (time.Time, bool) {
-	var apiErr *GithubAPIError
+	var apiErr *model.GithubAPIError
 	if errors.As(err, &apiErr) && (apiErr.Status == 403 || apiErr.Status == 429) {
-		return resetAtFromHeaders(apiErr.Headers), true
+		return resetAtFromHeaders(apiErr.Headers), true // Ensure resetAtFromHeaders exists in tokenpool.go
 	}
 	var rl *rateLimitedGraphQLError
 	if errors.As(err, &rl) {
@@ -219,31 +254,32 @@ func wrapErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	var exhausted *AllTokensExhaustedError
+	var exhausted *model.AllTokensExhaustedError
 	if errors.As(err, &exhausted) {
 		return err
 	}
-	var apiErr *GithubAPIError
+	var apiErr *model.GithubAPIError
 	if errors.As(err, &apiErr) {
 		return err
 	}
-	return &GithubAPIError{Msg: err.Error()}
+	return &model.GithubAPIError{Msg: err.Error()}
 }
 
-func FetchUserProfile(ctx context.Context, client *GraphQLClient, pool *TokenPool, login string) (UserProfile, RateLimit, error) {
+func FetchUserProfile(ctx context.Context, client *GraphQLClient, pool *TokenPool, login string) (UserProfile, model.RateLimit, error) {
 	data, err := withTokenRotation(pool, func(token string) (userProfileQueryData, error) {
 		d, err := doGraphQL[userProfileQueryData](ctx, client, token, userProfileQuery, map[string]any{"login": login})
 		if err != nil {
 			return d, err
 		}
-		pool.Report(token, d.RateLimit.Remaining, d.RateLimit.Limit, d.RateLimit.ResetAt)
+		pool.Report(token, d.RateLimit.Remaining, d.RateLimit.Limit, d.RateLimit.Reset)
 		return d, nil
 	}, classifyGraphQLRateLimitError)
+	
 	if err != nil {
-		return UserProfile{}, RateLimit{}, wrapErr(err)
+		return UserProfile{}, model.RateLimit{}, wrapErr(err)
 	}
 	if data.User == nil {
-		return UserProfile{}, RateLimit{}, &GithubAPIError{Msg: fmt.Sprintf("User not found: %s", login), Status: 404}
+		return UserProfile{}, model.RateLimit{}, &model.GithubAPIError{Msg: fmt.Sprintf("User not found: %s", login), Status: 404}
 	}
 	profile := UserProfile{
 		ProfileNode:    data.User.profileFieldsData.toNode(),
@@ -261,10 +297,10 @@ type AudiencePageOptions struct {
 type AudiencePageResult struct {
 	Login     string
 	Audience  AudienceConnection
-	RateLimit RateLimit
+	RateLimit model.RateLimit
 }
 
-func FetchAudiencePage(ctx context.Context, client *GraphQLClient, pool *TokenPool, login string, audienceType AudienceType, opts AudiencePageOptions) (AudiencePageResult, error) {
+func FetchAudiencePage(ctx context.Context, client *GraphQLClient, pool *TokenPool, login string, audienceType model.AudienceType, opts AudiencePageOptions) (AudiencePageResult, error) {
 	first := opts.First
 	if first <= 0 {
 		first = githubMaxPageSize
@@ -283,26 +319,27 @@ func FetchAudiencePage(ctx context.Context, client *GraphQLClient, pool *TokenPo
 		if err != nil {
 			return d, err
 		}
-		pool.Report(token, d.RateLimit.Remaining, d.RateLimit.Limit, d.RateLimit.ResetAt)
+		pool.Report(token, d.RateLimit.Remaining, d.RateLimit.Limit, d.RateLimit.Reset)
 		return d, nil
 	}, classifyGraphQLRateLimitError)
+	
 	if err != nil {
 		return AudiencePageResult{}, wrapErr(err)
 	}
 	if data.User == nil {
-		return AudiencePageResult{}, &GithubAPIError{Msg: fmt.Sprintf("User not found: %s", login), Status: 404}
+		return AudiencePageResult{}, &model.GithubAPIError{Msg: fmt.Sprintf("User not found: %s", login), Status: 404}
 	}
 	conn := data.connection(audienceType)
 	if conn == nil {
-		return AudiencePageResult{}, &GithubAPIError{
+		return AudiencePageResult{}, &model.GithubAPIError{
 			Msg: fmt.Sprintf("GitHub returned no %s data for user %q (the account may be suspended, blocked, or otherwise restricted).", audienceType, login),
 		}
 	}
 	return AudiencePageResult{Login: data.User.Login, Audience: *conn, RateLimit: data.RateLimit}, nil
 }
 
-func FetchAllAudience(ctx context.Context, client *GraphQLClient, pool *TokenPool, login string, audienceType AudienceType, onProgress func(done, total int)) (AllAudienceResult, error) {
-	collected := make(map[string]ProfileNode)
+func FetchAllAudience(ctx context.Context, client *GraphQLClient, pool *TokenPool, login string, audienceType model.AudienceType, onProgress func(done, total int)) (AllAudienceResult, error) {
+	collected := make(map[string]model.ProfileNode)
 	order := make([]string, 0)
 	var after *string
 	var totalCount int
@@ -310,13 +347,13 @@ func FetchAllAudience(ctx context.Context, client *GraphQLClient, pool *TokenPoo
 	for {
 		page, err := FetchAudiencePage(ctx, client, pool, login, audienceType, AudiencePageOptions{After: after})
 		if err != nil {
-			var exhausted *AllTokensExhaustedError
+			var exhausted *model.AllTokensExhaustedError
 			if errors.As(err, &exhausted) {
-				nodes := make([]ProfileNode, 0, len(order))
+				nodes := make([]model.ProfileNode, 0, len(order))
 				for _, id := range order {
 					nodes = append(nodes, collected[id])
 				}
-				return AllAudienceResult{}, &RateLimitError{ResetAt: exhausted.ResetAt, PartialNodes: nodes}
+				return AllAudienceResult{}, &PaginationRateLimitError{ResetAt: exhausted.ResetsAt, PartialNodes: nodes}
 			}
 			return AllAudienceResult{}, err
 		}
@@ -328,6 +365,7 @@ func FetchAllAudience(ctx context.Context, client *GraphQLClient, pool *TokenPoo
 			collected[node.ID] = node
 		}
 		totalCount = page.Audience.TotalCount
+		
 		if onProgress != nil {
 			onProgress(len(collected), totalCount)
 		}
@@ -345,14 +383,14 @@ func FetchAllAudience(ctx context.Context, client *GraphQLClient, pool *TokenPoo
 		after = next
 	}
 
-	nodes := make([]ProfileNode, 0, len(order))
+	nodes := make([]model.ProfileNode, 0, len(order))
 	for _, id := range order {
 		nodes = append(nodes, collected[id])
 	}
 	return AllAudienceResult{Nodes: nodes, TotalCount: totalCount}, nil
 }
 
-func EstimateAudienceCost(followersCount, followingCount int, rl RateLimit) CostEstimate {
+func EstimateAudienceCost(followersCount, followingCount int, rl model.RateLimit) CostEstimate {
 	followerPages := int(math.Ceil(float64(followersCount) / githubMaxPageSize))
 	followingPages := int(math.Ceil(float64(followingCount) / githubMaxPageSize))
 	pointsNeeded := followerPages + followingPages

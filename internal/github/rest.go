@@ -1,4 +1,4 @@
-package githubaudience
+package github
 
 import (
 	"context"
@@ -10,11 +10,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"githubaudience/internal/model"
 )
 
 const githubRESTBaseURL = "https://api.github.com"
 
-const BackfillConcurrency = 40
+const BackfillConcurrency = 20
 
 type RESTClient struct {
 	HTTPClient *http.Client
@@ -39,8 +41,8 @@ type githubProfileRest struct {
 	SiteAdmin       bool    `json:"site_admin"`
 }
 
-func (u githubProfileRest) toNode() ProfileNode {
-	return ProfileNode{
+func (u githubProfileRest) toNode() model.ProfileNode {
+	return model.ProfileNode{
 		Login:           u.Login,
 		ID:              u.NodeID,
 		Name:            u.Name,
@@ -53,8 +55,8 @@ func (u githubProfileRest) toNode() ProfileNode {
 	}
 }
 
-func audienceRoute(audienceType AudienceType) string {
-	if audienceType == AudienceFollowers {
+func audienceRoute(audienceType model.AudienceType) string {
+	if audienceType == model.AudienceFollowers {
 		return "/users/%s/followers"
 	}
 	return "/users/%s/following"
@@ -77,14 +79,14 @@ func doREST[T any](ctx context.Context, client *RESTClient, token, path string) 
 
 	switch resp.StatusCode {
 	case http.StatusNotFound:
-		return zero, resp.Header, &GithubAPIError{Msg: "not found", Status: 404, Headers: resp.Header}
+		return zero, resp.Header, &model.GithubAPIError{Msg: "not found", Status: 404, Headers: resp.Header}
 	case http.StatusUnauthorized:
-		return zero, resp.Header, &GithubAPIError{Msg: "Invalid or expired GitHub token.", Status: 401, Headers: resp.Header}
+		return zero, resp.Header, &model.GithubAPIError{Msg: "Invalid or expired GitHub token.", Status: 401, Headers: resp.Header}
 	case http.StatusForbidden:
-		return zero, resp.Header, &GithubAPIError{Msg: "GitHub REST API rate limit exceeded.", Status: 403, Headers: resp.Header}
+		return zero, resp.Header, &model.GithubAPIError{Msg: "GitHub REST API rate limit exceeded.", Status: 403, Headers: resp.Header}
 	}
 	if resp.StatusCode >= 400 {
-		return zero, resp.Header, &GithubAPIError{Msg: fmt.Sprintf("GitHub REST API error: %d", resp.StatusCode), Status: resp.StatusCode, Headers: resp.Header}
+		return zero, resp.Header, &model.GithubAPIError{Msg: fmt.Sprintf("GitHub REST API error: %d", resp.StatusCode), Status: resp.StatusCode, Headers: resp.Header}
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&zero); err != nil {
@@ -94,7 +96,7 @@ func doREST[T any](ctx context.Context, client *RESTClient, token, path string) 
 }
 
 func classifyRESTRateLimitError(err error) (time.Time, bool) {
-	var apiErr *GithubAPIError
+	var apiErr *model.GithubAPIError
 	if errors.As(err, &apiErr) && (apiErr.Status == 403 || apiErr.Status == 429) {
 		return resetAtFromHeaders(apiErr.Headers), true
 	}
@@ -119,7 +121,7 @@ type restAudiencePage struct {
 	HasNextPage bool
 }
 
-func fetchAudiencePageRest(ctx context.Context, client *RESTClient, pool *TokenPool, login string, audienceType AudienceType, page int) (restAudiencePage, error) {
+func fetchAudiencePageRest(ctx context.Context, client *RESTClient, pool *TokenPool, login string, audienceType model.AudienceType, page int) (restAudiencePage, error) {
 	path := fmt.Sprintf(audienceRoute(audienceType), login) + fmt.Sprintf("?per_page=%d&page=%d", githubMaxPageSize, page)
 
 	type restUser struct {
@@ -152,7 +154,7 @@ func fetchAudiencePageRest(ctx context.Context, client *RESTClient, pool *TokenP
 	return result, nil
 }
 
-func FetchAllAudienceLoginsRest(ctx context.Context, client *RESTClient, pool *TokenPool, login string, audienceType AudienceType, onProgress func(done int)) (map[string]struct{}, error) {
+func FetchAllAudienceLoginsRest(ctx context.Context, client *RESTClient, pool *TokenPool, login string, audienceType model.AudienceType, onProgress func(done int)) (map[string]struct{}, error) {
 	logins := make(map[string]struct{})
 	page := 1
 	hasNextPage := true
@@ -174,8 +176,8 @@ func FetchAllAudienceLoginsRest(ctx context.Context, client *RESTClient, pool *T
 	return logins, nil
 }
 
-func FetchUserProfileRest(ctx context.Context, client *RESTClient, pool *TokenPool, login string) (*ProfileNode, error) {
-	result, err := withTokenRotation(pool, func(token string) (*ProfileNode, error) {
+func FetchUserProfileRest(ctx context.Context, client *RESTClient, pool *TokenPool, login string) (*model.ProfileNode, error) {
+	result, err := withTokenRotation(pool, func(token string) (*model.ProfileNode, error) {
 		user, headers, err := doREST[githubProfileRest](ctx, client, token, "/users/"+login)
 		if err != nil {
 			return nil, err
@@ -189,7 +191,7 @@ func FetchUserProfileRest(ctx context.Context, client *RESTClient, pool *TokenPo
 		if errors.As(err, &exhausted) {
 			return nil, err
 		}
-		var apiErr *GithubAPIError
+		var apiErr *model.GithubAPIError
 		if errors.As(err, &apiErr) && apiErr.Status == 404 {
 			return nil, nil
 		}
@@ -199,7 +201,7 @@ func FetchUserProfileRest(ctx context.Context, client *RESTClient, pool *TokenPo
 }
 
 type BatchProfilesResult struct {
-	Profiles   map[string]ProfileNode
+	Profiles   map[string]model.ProfileNode
 	Unresolved []string
 }
 
@@ -211,12 +213,12 @@ func FetchProfilesByLoginRest(ctx context.Context, client *RESTClient, pool *Tok
 		concurrency = len(logins)
 	}
 	if concurrency == 0 {
-		return BatchProfilesResult{Profiles: map[string]ProfileNode{}}, nil
+		return BatchProfilesResult{Profiles: map[string]model.ProfileNode{}}, nil
 	}
 
 	var (
 		mu         sync.Mutex
-		profiles   = make(map[string]ProfileNode)
+		profiles   = make(map[string]model.ProfileNode)
 		unresolved []string
 		firstErr   error
 	)
