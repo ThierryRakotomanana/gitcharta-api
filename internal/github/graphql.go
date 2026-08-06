@@ -273,7 +273,7 @@ func wrapErr(err error) error {
 	if errors.As(err, &apiErr) {
 		return err
 	}
-	return &model.GithubAPIError{Msg: err.Error()}
+	return &model.GithubAPIError{Msg: err.Error(), Err: err}
 }
 
 func FetchUserProfile(ctx context.Context, client *GraphQLClient, pool *TokenPool, login string) (UserProfile, model.RateLimit, error) {
