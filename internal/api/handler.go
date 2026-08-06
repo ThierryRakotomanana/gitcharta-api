@@ -42,19 +42,14 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 }
 
 func writeError(w http.ResponseWriter, err error) {
-	status := http.StatusInternalServerError
-	msg := "internal server error"
-
 	var apiErr *model.GithubAPIError
-	if errors.As(err, &apiErr) {
-		msg = apiErr.Msg
-		status = apiErr.Status
-		if status == 0 {
-			status = http.StatusBadGateway
-		}
+	if errors.As(err, &apiErr) && apiErr.Status != 0 {
+		writeJSON(w, apiErr.Status, map[string]string{"error": apiErr.Msg})
+		return
 	}
 
-	writeJSON(w, status, map[string]string{"error": msg})
+	log.Printf("internal error: %v", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 }
 
 func (s *Server) HandleCreateAudienceJob(w http.ResponseWriter, r *http.Request) {
