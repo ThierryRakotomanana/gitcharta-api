@@ -61,7 +61,7 @@ func (s *Server) HandleCreateAudienceJob(w http.ResponseWriter, r *http.Request)
 	login := r.URL.Query().Get("login")
 	audienceType := model.AudienceType(r.URL.Query().Get("type"))
 
-	if login == "" || !audienceType.Valid() {
+	if login == "" || !audienceType.Valid() || !model.ValidLogin(login) {
 		writeError(w, &model.GithubAPIError{Msg: "invalid login or type parameter", Status: http.StatusBadRequest})
 		return
 	}
