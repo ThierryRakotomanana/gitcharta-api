@@ -21,7 +21,7 @@ func main() {
 		log.Fatalf("failed to build token pool: %v", err)
 	}
 
-	jobStore := jobs.NewJobStore()
+	jobStore := jobs.NewJobStore(10)
 	server := api.NewServer(pool, jobStore)
 
 	mux := http.NewServeMux()

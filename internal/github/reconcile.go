@@ -2,6 +2,8 @@ package github
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"githubaudience/internal/model"
 )
@@ -24,6 +26,16 @@ func FetchAllAudienceReconciled(
 		}
 	})
 	if err != nil {
+		var partial *PaginationRateLimitError
+		if errors.As(err, &partial) {
+			resumeAt := partial.ResetAt
+			return model.ReconciledAudienceResult{
+				Nodes:             partial.PartialNodes,
+				GraphQLTotalCount: partial.TotalCount,
+				Partial:           true,
+				ResumeAfter:       &resumeAt,
+			}, nil
+		}
 		return model.ReconciledAudienceResult{}, err
 	}
 
@@ -38,6 +50,17 @@ func FetchAllAudienceReconciled(
 		}
 	})
 	if err != nil {
+		var partial *PartialAudienceLoginsError
+		if errors.As(err, &partial) {
+			resumeAt := partial.ResetAt
+			return model.ReconciledAudienceResult{
+				Nodes:             graphqlResult.Nodes,
+				GraphQLTotalCount: graphqlResult.TotalCount,
+				RESTTotalCount:    len(partial.Logins),
+				Partial:           true,
+				ResumeAfter:       &resumeAt,
+			}, nil
+		}
 		return model.ReconciledAudienceResult{}, err
 	}
 
@@ -49,7 +72,12 @@ func FetchAllAudienceReconciled(
 	}
 	reconciledTotal := len(byLogin) + len(missing)
 
-	var recovered, unresolved []string
+	var (
+		recovered       []string
+		unresolved      []string
+		partialBackfill bool
+		resumeAfter     *time.Time
+	)
 
 	if onProgress != nil {
 		total := reconciledTotal
@@ -61,6 +89,12 @@ func FetchAllAudienceReconciled(
 		if end > len(missing) {
 			end = len(missing)
 		}
+
+		if partialBackfill {
+			unresolved = append(unresolved, missing[i:end]...)
+			continue
+		}
+
 		chunk := missing[i:end]
 
 		result, err := FetchProfilesByLoginRest(ctx, restClient, pool, chunk, BackfillConcurrency)
@@ -72,6 +106,10 @@ func FetchAllAudienceReconciled(
 			recovered = append(recovered, l)
 		}
 		unresolved = append(unresolved, result.Unresolved...)
+		if result.Partial {
+			partialBackfill = true
+			resumeAfter = result.ResumeAfter
+		}
 
 		if onProgress != nil {
 			total := reconciledTotal
@@ -90,5 +128,7 @@ func FetchAllAudienceReconciled(
 		RESTTotalCount:    len(restLogins),
 		RecoveredLogins:   recovered,
 		UnresolvedLogins:  unresolved,
+		Partial:           partialBackfill,
+		ResumeAfter:       resumeAfter,
 	}, nil
 }

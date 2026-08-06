@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"regexp"
 	"time"
 )
 
@@ -14,6 +15,12 @@ const (
 
 func (t AudienceType) Valid() bool {
 	return t == AudienceFollowers || t == AudienceFollowing
+}
+
+var loginPattern = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$`)
+
+func ValidLogin(login string) bool {
+	return loginPattern.MatchString(login)
 }
 
 type ProfileNode struct {
@@ -44,6 +51,8 @@ type ReconciledAudienceResult struct {
 	RESTTotalCount    int           `json:"restTotalCount"`
 	RecoveredLogins   []string      `json:"recoveredLogins"`
 	UnresolvedLogins  []string      `json:"unresolvedLogins"`
+	Partial           bool          `json:"partial"`
+	ResumeAfter       *time.Time    `json:"resumeAfter,omitempty"`
 }
 
 type JobStatus string
@@ -52,7 +61,8 @@ const (
 	StatusPending   JobStatus = "pending"
 	StatusRunning   JobStatus = "running"
 	StatusCompleted JobStatus = "completed"
-	StatusFailed    JobStatus = "failed"
+	StatusPartial JobStatus = "partial"
+	StatusFailed  JobStatus = "failed"
 )
 
 type JobProgress struct {
@@ -93,12 +103,4 @@ type RateLimitError struct {
 
 func (e *RateLimitError) Error() string {
 	return fmt.Sprintf("rate limit exceeded, resets at %v", e.Limit.Reset)
-}
-
-type AllTokensExhaustedError struct {
-	ResetsAt time.Time
-}
-
-func (e *AllTokensExhaustedError) Error() string {
-	return fmt.Sprintf("all tokens exhausted, earliest reset at %v", e.ResetsAt)
 }
