@@ -1,50 +1,73 @@
-package github
+package api
 
 import (
-	"math"
+	"net"
 	"net/http"
-	"strconv"
-	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
-const quotaBufferRatio = 0.02
-
-func computeQuotaBuffer(limit int) int {
-	if b := int(math.Ceil(float64(limit) * quotaBufferRatio)); b > 1 {
-		return b
-	}
-	return 1
+type ipLimiter struct {
+	mu       sync.Mutex
+	limiters map[string]*rate.Limiter
+	rps      rate.Limit
+	burst    int
 }
 
-func resetAtFromHeaders(headers map[string][]string) time.Time {
-	get := func(key string) string {
-		for k, v := range headers {
-			if strings.EqualFold(k, key) && len(v) > 0 {
-				return v[0]
+func newIPLimiter(rps rate.Limit, burst int) *ipLimiter {
+	l := &ipLimiter{
+		limiters: make(map[string]*rate.Limiter),
+		rps:      rps,
+		burst:    burst,
+	}
+	go l.cleanupLoop()
+	return l
+}
+
+func (l *ipLimiter) get(ip string) *rate.Limiter {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	lim, ok := l.limiters[ip]
+	if !ok {
+		lim = rate.NewLimiter(l.rps, l.burst)
+		l.limiters[ip] = lim
+	}
+	return lim
+}
+
+func (l *ipLimiter) cleanupLoop() {
+	ticker := time.NewTicker(10 * time.Minute)
+	for range ticker.C {
+		l.mu.Lock()
+		for ip, lim := range l.limiters {
+			if lim.Tokens() >= float64(l.burst) {
+				delete(l.limiters, ip)
 			}
 		}
-		return ""
+		l.mu.Unlock()
 	}
-	if ra := get("Retry-After"); ra != "" {
-		if secs, err := strconv.Atoi(ra); err == nil {
-			return time.Now().Add(time.Duration(secs) * time.Second)
-		}
-	}
-	if rr := get("X-RateLimit-Reset"); rr != "" {
-		if unix, err := strconv.ParseInt(rr, 10, 64); err == nil {
-			return time.Unix(unix, 0)
-		}
-	}
-	return time.Now().Add(60 * time.Second)
 }
 
-func classifyForbidden(headers http.Header) (time.Time, bool) {
-	if headers.Get("Retry-After") != "" {
-		return resetAtFromHeaders(headers), true
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
 	}
-	if headers.Get("X-RateLimit-Remaining") == "0" {
-		return resetAtFromHeaders(headers), true
+	return host
+}
+
+func RateLimitMiddleware(rps rate.Limit, burst int) func(http.Handler) http.Handler {
+	limiter := newIPLimiter(rps, burst)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := clientIP(r)
+			if !limiter.get(ip).Allow() {
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many requests"})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
-	return time.Time{}, false
 }

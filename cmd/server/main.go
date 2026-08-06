@@ -9,6 +9,8 @@ import (
 	"githubaudience/internal/api"
 	"githubaudience/internal/github"
 	"githubaudience/internal/jobs"
+
+	"golang.org/x/time/rate"
 )
 
 func main() {
@@ -29,7 +31,9 @@ func main() {
 	mux.HandleFunc("GET /api/audience/jobs/{id}", server.HandleGetAudienceJob)
 
 	allowedOrigins := strings.Split(os.Getenv("CORS_ALLOWED_ORIGINS"), ",")
-	handler := api.CORSMiddleware(allowedOrigins)(mux)
+	handler := api.CORSMiddleware(allowedOrigins)( 
+		api.RateLimitMiddleware(rate.Limit(0.2), 3)(mux),
+	)
 
 	addr := os.Getenv("ADDR")
 	if addr == "" {
