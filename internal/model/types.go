@@ -87,9 +87,11 @@ type GithubAPIError struct {
 	Msg     string
 	Status  int
 	Headers map[string][]string
+	Err     error
 }
 
 func (e *GithubAPIError) Error() string { return e.Msg }
+func (e *GithubAPIError) Unwrap() error { return e.Err }
 
 type RateLimit struct {
 	Limit     int
