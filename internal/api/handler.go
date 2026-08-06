@@ -42,27 +42,53 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 }
 
 func writeError(w http.ResponseWriter, err error) {
-	status := http.StatusInternalServerError
-	msg := "internal server error"
-
 	var apiErr *model.GithubAPIError
-	if errors.As(err, &apiErr) {
-		msg = apiErr.Msg
-		status = apiErr.Status
-		if status == 0 {
-			status = http.StatusBadGateway
-		}
+	if errors.As(err, &apiErr) && apiErr.Status != 0 {
+		writeJSON(w, apiErr.Status, map[string]string{"error": apiErr.Msg})
+		return
 	}
 
-	writeJSON(w, status, map[string]string{"error": msg})
+	log.Printf("internal error: %v", err)
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 }
 
 func (s *Server) HandleCreateAudienceJob(w http.ResponseWriter, r *http.Request) {
 	login := r.URL.Query().Get("login")
 	audienceType := model.AudienceType(r.URL.Query().Get("type"))
 
-	if login == "" || !audienceType.Valid() {
+	if login == "" || !audienceType.Valid() || !model.ValidLogin(login) {
 		writeError(w, &model.GithubAPIError{Msg: "invalid login or type parameter", Status: http.StatusBadRequest})
+		return
+	}
+
+	checkCtx, checkCancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer checkCancel()
+
+	profile, rl, err := github.FetchUserProfile(checkCtx, s.GraphQL, s.Pool, login)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	const maxAudienceSize = 50_000
+	total := profile.FollowersCount
+	if audienceType == model.AudienceFollowing {
+		total = profile.FollowingCount
+	}
+	if total > maxAudienceSize {
+		writeError(w, &model.GithubAPIError{
+			Msg:    fmt.Sprintf("requested audience (%d) exceeds the %d limit", total, maxAudienceSize),
+			Status: http.StatusUnprocessableEntity,
+		})
+		return
+	}
+
+	estimate := github.EstimateAudienceCost(profile.FollowersCount, profile.FollowingCount, rl)
+	if estimate.WillExceed {
+		writeError(w, &model.GithubAPIError{
+			Msg:    "requested audience too large for current token quota, try again later",
+			Status: http.StatusTooManyRequests,
+		})
 		return
 	}
 
