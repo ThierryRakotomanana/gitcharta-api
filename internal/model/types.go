@@ -80,3 +80,25 @@ type GithubAPIError struct {
 }
 
 func (e *GithubAPIError) Error() string { return e.Msg }
+
+type RateLimit struct {
+	Limit     int
+	Remaining int
+	Reset     time.Time
+}
+
+type RateLimitError struct {
+	Limit RateLimit
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("rate limit exceeded, resets at %v", e.Limit.Reset)
+}
+
+type AllTokensExhaustedError struct {
+	ResetsAt time.Time
+}
+
+func (e *AllTokensExhaustedError) Error() string {
+	return fmt.Sprintf("all tokens exhausted, earliest reset at %v", e.ResetsAt)
+}
