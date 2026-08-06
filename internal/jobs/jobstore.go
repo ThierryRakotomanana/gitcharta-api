@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"yourmodule/internal/model"
+	"githubaudience/internal/model"
 )
 
 type JobStore struct {
