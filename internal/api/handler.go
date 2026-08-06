@@ -66,6 +66,37 @@ func (s *Server) HandleCreateAudienceJob(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	checkCtx, checkCancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer checkCancel()
+
+	profile, rl, err := github.FetchUserProfile(checkCtx, s.GraphQL, s.Pool, login)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	const maxAudienceSize = 50_000
+	total := profile.FollowersCount
+	if audienceType == model.AudienceFollowing {
+		total = profile.FollowingCount
+	}
+	if total > maxAudienceSize {
+		writeError(w, &model.GithubAPIError{
+			Msg:    fmt.Sprintf("requested audience (%d) exceeds the %d limit", total, maxAudienceSize),
+			Status: http.StatusUnprocessableEntity,
+		})
+		return
+	}
+
+	estimate := github.EstimateAudienceCost(profile.FollowersCount, profile.FollowingCount, rl)
+	if estimate.WillExceed {
+		writeError(w, &model.GithubAPIError{
+			Msg:    "requested audience too large for current token quota, try again later",
+			Status: http.StatusTooManyRequests,
+		})
+		return
+	}
+
 	job, err := s.Jobs.Create(login, audienceType)
 	if err != nil {
 		writeError(w, err)
