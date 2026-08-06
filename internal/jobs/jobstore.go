@@ -62,9 +62,9 @@ func (s *JobStore) Create(login string, audienceType model.AudienceType) (*model
 
 	s.mu.Lock()
 	s.jobs[id] = job
+	jobCopy := *job
 	s.mu.Unlock()
-
-	return job, nil
+	return &jobCopy, nil
 }
 
 func (s *JobStore) Get(id string) (*model.AudienceJob, bool) {
