@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,7 +25,7 @@ type RESTClient struct {
 
 func NewRESTClient(httpClient *http.Client) *RESTClient {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = &http.Client{Timeout: 30 * time.Second, Transport: DefaultTransport()}
 	}
 	return &RESTClient{HTTPClient: httpClient}
 }
@@ -55,11 +56,15 @@ func (u githubProfileRest) toNode() model.ProfileNode {
 	}
 }
 
-func audienceRoute(audienceType model.AudienceType) string {
-	if audienceType == model.AudienceFollowers {
-		return "/users/%s/followers"
+func audienceRoute(audienceType model.AudienceType) (string, error) {
+	switch audienceType {
+	case model.AudienceFollowers:
+		return "/users/%s/followers", nil
+	case model.AudienceFollowing:
+		return "/users/%s/following", nil
+	default:
+		return "", &model.GithubAPIError{Msg: fmt.Sprintf("unsupported audience type: %q", audienceType), Status: http.StatusBadRequest}
 	}
-	return "/users/%s/following"
 }
 
 func doREST[T any](ctx context.Context, client *RESTClient, token, path string) (T, http.Header, error) {
@@ -97,10 +102,17 @@ func doREST[T any](ctx context.Context, client *RESTClient, token, path string) 
 
 func classifyRESTRateLimitError(err error) (time.Time, bool) {
 	var apiErr *model.GithubAPIError
-	if errors.As(err, &apiErr) && (apiErr.Status == 403 || apiErr.Status == 429) {
-		return resetAtFromHeaders(apiErr.Headers), true
+	if !errors.As(err, &apiErr) {
+		return time.Time{}, false
 	}
-	return time.Time{}, false
+	switch apiErr.Status {
+	case 429:
+		return resetAtFromHeaders(apiErr.Headers), true
+	case 403:
+		return classifyForbidden(http.Header(apiErr.Headers))
+	default:
+		return time.Time{}, false
+	}
 }
 
 func reportRESTUsage(pool *TokenPool, token string, headers http.Header) {
@@ -122,17 +134,19 @@ type restAudiencePage struct {
 }
 
 func fetchAudiencePageRest(ctx context.Context, client *RESTClient, pool *TokenPool, login string, audienceType model.AudienceType, page int) (restAudiencePage, error) {
-	path := fmt.Sprintf(audienceRoute(audienceType), login) + fmt.Sprintf("?per_page=%d&page=%d", githubMaxPageSize, page)
+	routeTmpl, err := audienceRoute(audienceType)
+	if err != nil {
+		return restAudiencePage{}, err
+	}
+
+	path := fmt.Sprintf(routeTmpl, url.PathEscape(login)) + fmt.Sprintf("?per_page=%d&page=%d", githubMaxPageSize, page)
 
 	type restUser struct {
 		Login string `json:"login"`
 	}
 
 	result, err := withTokenRotation(pool, func(token string) (restAudiencePage, error) {
-		var users []restUser
-		var headers http.Header
-		var err error
-		users, headers, err = doREST[[]restUser](ctx, client, token, path)
+		users, headers, err := doREST[[]restUser](ctx, client, token, path)
 		if err != nil {
 			return restAudiencePage{}, err
 		}
@@ -154,6 +168,15 @@ func fetchAudiencePageRest(ctx context.Context, client *RESTClient, pool *TokenP
 	return result, nil
 }
 
+type PartialAudienceLoginsError struct {
+	ResetAt time.Time
+	Logins  map[string]struct{}
+}
+
+func (e *PartialAudienceLoginsError) Error() string {
+	return "audience login pagination interrupted by token pool exhaustion"
+}
+
 func FetchAllAudienceLoginsRest(ctx context.Context, client *RESTClient, pool *TokenPool, login string, audienceType model.AudienceType, onProgress func(done int)) (map[string]struct{}, error) {
 	logins := make(map[string]struct{})
 	page := 1
@@ -162,6 +185,10 @@ func FetchAllAudienceLoginsRest(ctx context.Context, client *RESTClient, pool *T
 	for hasNextPage {
 		result, err := fetchAudiencePageRest(ctx, client, pool, login, audienceType, page)
 		if err != nil {
+			var exhausted *AllTokensExhaustedError
+			if errors.As(err, &exhausted) {
+				return nil, &PartialAudienceLoginsError{ResetAt: exhausted.ResetAt, Logins: logins}
+			}
 			return nil, err
 		}
 		for _, l := range result.Logins {
@@ -178,7 +205,7 @@ func FetchAllAudienceLoginsRest(ctx context.Context, client *RESTClient, pool *T
 
 func FetchUserProfileRest(ctx context.Context, client *RESTClient, pool *TokenPool, login string) (*model.ProfileNode, error) {
 	result, err := withTokenRotation(pool, func(token string) (*model.ProfileNode, error) {
-		user, headers, err := doREST[githubProfileRest](ctx, client, token, "/users/"+login)
+		user, headers, err := doREST[githubProfileRest](ctx, client, token, "/users/"+url.PathEscape(login))
 		if err != nil {
 			return nil, err
 		}
@@ -201,8 +228,10 @@ func FetchUserProfileRest(ctx context.Context, client *RESTClient, pool *TokenPo
 }
 
 type BatchProfilesResult struct {
-	Profiles   map[string]model.ProfileNode
-	Unresolved []string
+	Profiles    map[string]model.ProfileNode
+	Unresolved  []string
+	Partial     bool
+	ResumeAfter *time.Time
 }
 
 func FetchProfilesByLoginRest(ctx context.Context, client *RESTClient, pool *TokenPool, logins []string, concurrency int) (BatchProfilesResult, error) {
@@ -217,10 +246,11 @@ func FetchProfilesByLoginRest(ctx context.Context, client *RESTClient, pool *Tok
 	}
 
 	var (
-		mu         sync.Mutex
-		profiles   = make(map[string]model.ProfileNode)
-		unresolved []string
-		firstErr   error
+		mu          sync.Mutex
+		profiles    = make(map[string]model.ProfileNode)
+		unresolved  []string
+		partial     bool
+		resumeAfter *time.Time
 	)
 
 	jobs := make(chan string)
@@ -229,13 +259,26 @@ func FetchProfilesByLoginRest(ctx context.Context, client *RESTClient, pool *Tok
 	worker := func() {
 		defer wg.Done()
 		for login := range jobs {
+			mu.Lock()
+			alreadyExhausted := partial
+			mu.Unlock()
+			if alreadyExhausted {
+				mu.Lock()
+				unresolved = append(unresolved, login)
+				mu.Unlock()
+				continue
+			}
+
 			node, err := FetchUserProfileRest(ctx, client, pool, login)
 			if err != nil {
-				var exhausted *AllTokensExhaustedError
-				if errors.As(err, &exhausted) {
+				var exhaustedErr *AllTokensExhaustedError
+				if errors.As(err, &exhaustedErr) {
 					mu.Lock()
-					if firstErr == nil {
-						firstErr = err
+					unresolved = append(unresolved, login)
+					if !partial {
+						partial = true
+						t := exhaustedErr.ResetAt
+						resumeAfter = &t
 					}
 					mu.Unlock()
 					continue
@@ -265,8 +308,10 @@ func FetchProfilesByLoginRest(ctx context.Context, client *RESTClient, pool *Tok
 	close(jobs)
 	wg.Wait()
 
-	if firstErr != nil {
-		return BatchProfilesResult{}, firstErr
-	}
-	return BatchProfilesResult{Profiles: profiles, Unresolved: unresolved}, nil
+	return BatchProfilesResult{
+		Profiles:    profiles,
+		Unresolved:  unresolved,
+		Partial:     partial,
+		ResumeAfter: resumeAfter,
+	}, nil
 }
