@@ -68,22 +68,28 @@ func (s *Server) HandleCreateAudienceJob(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	job, err := s.Jobs.Create(login, audienceType)
+	job, created, err := s.Jobs.Create(login, audienceType)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 
-	go func(jobID, login string, audType model.AudienceType) {
+	if !created {
+		writeJSON(w, http.StatusOK, job)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Hour)
+	s.Jobs.SetCancel(job.ID, cancel)
+
+	go func(jobID, login string, audType model.AudienceType, ctx context.Context, cancel context.CancelFunc) {
+		defer cancel()
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("panic in audience job %s: %v", jobID, r)
 				s.Jobs.Fail(jobID, fmt.Errorf("internal error while processing job"))
 			}
 		}()
-
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Hour)
-		defer cancel()
 
 		progressCb := func(stage model.ReconcileStage, done int, total *int) {
 			s.Jobs.UpdateProgress(jobID, stage, done, total)
@@ -96,7 +102,7 @@ func (s *Server) HandleCreateAudienceJob(w http.ResponseWriter, r *http.Request)
 		}
 
 		s.Jobs.Complete(jobID, result)
-	}(job.ID, login, audienceType)
+	}(job.ID, login, audienceType, ctx, cancel)
 
 	writeJSON(w, http.StatusAccepted, job)
 }
@@ -110,6 +116,29 @@ func (s *Server) HandleGetAudienceJob(w http.ResponseWriter, r *http.Request) {
 	job, exists := s.Jobs.Get(jobID)
 	if !exists {
 		writeError(w, &model.GithubAPIError{Msg: "job not found", Status: http.StatusNotFound})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) HandleCancelAudienceJob(w http.ResponseWriter, r *http.Request) {
+	jobID := r.PathValue("id")
+	if jobID == "" {
+		writeError(w, &model.GithubAPIError{Msg: "job id required", Status: http.StatusBadRequest})
+		return
+	}
+
+	job, err := s.Jobs.Cancel(jobID)
+	if err != nil {
+		switch {
+		case errors.Is(err, jobs.ErrJobNotFound):
+			writeError(w, &model.GithubAPIError{Msg: "job not found", Status: http.StatusNotFound})
+		case errors.Is(err, jobs.ErrJobNotCancellable):
+			writeError(w, &model.GithubAPIError{Msg: "job already finished", Status: http.StatusConflict})
+		default:
+			writeError(w, err)
+		}
 		return
 	}
 

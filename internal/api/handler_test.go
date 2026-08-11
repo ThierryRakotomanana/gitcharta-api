@@ -91,7 +91,7 @@ func TestHandleGetAudienceJob_NotFound(t *testing.T) {
 
 func TestHandleGetAudienceJob_ReturnsExistingJob(t *testing.T) {
 	s := newTestServer(t)
-	job, err := s.Jobs.Create("octocat", model.AudienceFollowers)
+	job, _, err := s.Jobs.Create("octocat", model.AudienceFollowers)
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
@@ -111,6 +111,65 @@ func TestHandleGetAudienceJob_ReturnsExistingJob(t *testing.T) {
 	}
 	if got.ID != job.ID || got.Login != "octocat" {
 		t.Errorf("got job %+v, want ID=%s Login=octocat", got, job.ID)
+	}
+}
+
+func TestHandleCancelAudienceJob_CancelsInFlightJob(t *testing.T) {
+	s := newTestServer(t)
+	job, _, err := s.Jobs.Create("torvalds", model.AudienceFollowers)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	cancelled := false
+	s.Jobs.SetCancel(job.ID, func() { cancelled = true })
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/audience/jobs/"+job.ID, nil)
+	req.SetPathValue("id", job.ID)
+	rec := httptest.NewRecorder()
+
+	s.HandleCancelAudienceJob(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !cancelled {
+		t.Error("expected cancel func to be invoked")
+	}
+	var got model.AudienceJob
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Status != model.StatusCancelled {
+		t.Errorf("status = %q, want %q", got.Status, model.StatusCancelled)
+	}
+}
+
+func TestHandleCancelAudienceJob_UnknownIDReturns404(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodDelete, "/api/audience/jobs/does-not-exist", nil)
+	req.SetPathValue("id", "does-not-exist")
+	rec := httptest.NewRecorder()
+
+	s.HandleCancelAudienceJob(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestHandleCancelAudienceJob_AlreadyFinishedReturns409(t *testing.T) {
+	s := newTestServer(t)
+	job, _, _ := s.Jobs.Create("torvalds", model.AudienceFollowers)
+	s.Jobs.Complete(job.ID, model.ReconciledAudienceResult{})
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/audience/jobs/"+job.ID, nil)
+	req.SetPathValue("id", job.ID)
+	rec := httptest.NewRecorder()
+
+	s.HandleCancelAudienceJob(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
 	}
 }
 
