@@ -358,16 +358,23 @@ func FetchAllAudience(ctx context.Context, client *GraphQLClient, pool *TokenPoo
 	var after *string
 	var totalCount int
 
+	partialResult := func(resetAt time.Time) (AllAudienceResult, error) {
+		nodes := make([]model.ProfileNode, 0, len(order))
+		for _, id := range order {
+			nodes = append(nodes, collected[id])
+		}
+		return AllAudienceResult{}, &PaginationRateLimitError{ResetAt: resetAt, PartialNodes: nodes, TotalCount: totalCount}
+	}
+
 	for {
 		page, err := FetchAudiencePage(ctx, client, pool, login, audienceType, AudiencePageOptions{After: after})
 		if err != nil {
 			var exhausted *AllTokensExhaustedError
 			if errors.As(err, &exhausted) {
-				nodes := make([]model.ProfileNode, 0, len(order))
-				for _, id := range order {
-					nodes = append(nodes, collected[id])
-				}
-				return AllAudienceResult{}, &PaginationRateLimitError{ResetAt: exhausted.ResetAt, PartialNodes: nodes, TotalCount: totalCount}
+				return partialResult(exhausted.ResetAt)
+			}
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return partialResult(time.Now().Add(time.Minute))
 			}
 			return AllAudienceResult{}, err
 		}
