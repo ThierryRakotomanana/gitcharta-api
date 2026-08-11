@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"runtime/debug"
 	"time"
 
 	"githubaudience/internal/github"
@@ -64,31 +63,8 @@ func (s *Server) HandleCreateAudienceJob(w http.ResponseWriter, r *http.Request)
 	checkCtx, checkCancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer checkCancel()
 
-	profile, rl, err := github.FetchUserProfile(checkCtx, s.GraphQL, s.Pool, login)
-	if err != nil {
+	if _, _, err := github.FetchUserProfile(checkCtx, s.GraphQL, s.Pool, login); err != nil {
 		writeError(w, err)
-		return
-	}
-
-	const maxAudienceSize = 50_000
-	total := profile.FollowersCount
-	if audienceType == model.AudienceFollowing {
-		total = profile.FollowingCount
-	}
-	if total > maxAudienceSize {
-		writeError(w, &model.GithubAPIError{
-			Msg:    fmt.Sprintf("requested audience (%d) exceeds the %d limit", total, maxAudienceSize),
-			Status: http.StatusUnprocessableEntity,
-		})
-		return
-	}
-
-	estimate := github.EstimateAudienceCost(profile.FollowersCount, profile.FollowingCount, rl)
-	if estimate.WillExceed {
-		writeError(w, &model.GithubAPIError{
-			Msg:    "requested audience too large for current token quota, try again later",
-			Status: http.StatusTooManyRequests,
-		})
 		return
 	}
 
@@ -101,12 +77,12 @@ func (s *Server) HandleCreateAudienceJob(w http.ResponseWriter, r *http.Request)
 	go func(jobID, login string, audType model.AudienceType) {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("panic in audience job %s: %v\n%s", jobID, r, debug.Stack())
+				log.Printf("panic in audience job %s: %v", jobID, r)
 				s.Jobs.Fail(jobID, fmt.Errorf("internal error while processing job"))
 			}
 		}()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Hour)
 		defer cancel()
 
 		progressCb := func(stage model.ReconcileStage, done int, total *int) {
