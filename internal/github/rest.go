@@ -189,6 +189,9 @@ func FetchAllAudienceLoginsRest(ctx context.Context, client *RESTClient, pool *T
 			if errors.As(err, &exhausted) {
 				return nil, &PartialAudienceLoginsError{ResetAt: exhausted.ResetAt, Logins: logins}
 			}
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return nil, &PartialAudienceLoginsError{ResetAt: time.Now().Add(time.Minute), Logins: logins}
+			}
 			return nil, err
 		}
 		for _, l := range result.Logins {
