@@ -43,10 +43,12 @@ func main() {
 		api.RateLimitMiddleware(rate.Limit(0.2), 3)(mux),
 	)
 
-	addr := os.Getenv("ADDR")
-	if addr == "" {
-		addr = ":8080"
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
 	}
+	
+	addr := ":" + port
 
 	srv := &http.Server{
 		Addr:              addr,
