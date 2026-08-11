@@ -33,6 +33,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/audience/jobs", server.HandleCreateAudienceJob)
 	mux.HandleFunc("GET /api/audience/jobs/{id}", server.HandleGetAudienceJob)
+	mux.HandleFunc("DELETE /api/audience/jobs/{id}", server.HandleCancelAudienceJob)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

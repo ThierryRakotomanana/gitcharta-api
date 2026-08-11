@@ -63,6 +63,7 @@ const (
 	StatusCompleted JobStatus = "completed"
 	StatusPartial   JobStatus = "partial"
 	StatusFailed    JobStatus = "failed"
+	StatusCancelled JobStatus = "cancelled"
 )
 
 type JobProgress struct {
