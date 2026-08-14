@@ -89,6 +89,7 @@ type GithubAPIError struct {
 	Status  int
 	Headers map[string][]string
 	Err     error
+	ResetAt *time.Time
 }
 
 func (e *GithubAPIError) Error() string { return e.Msg }

@@ -43,7 +43,20 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 func writeError(w http.ResponseWriter, err error) {
 	var apiErr *model.GithubAPIError
 	if errors.As(err, &apiErr) && apiErr.Status != 0 {
-		writeJSON(w, apiErr.Status, map[string]string{"error": apiErr.Msg})
+		body := map[string]any{"error": apiErr.Msg}
+		if apiErr.ResetAt != nil {
+			body["resetAt"] = apiErr.ResetAt.Format(time.RFC3339)
+		}
+		writeJSON(w, apiErr.Status, body)
+		return
+	}
+
+	var rlErr *model.RateLimitError
+	if errors.As(err, &rlErr) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{
+			"error":   rlErr.Error(),
+			"resetAt": rlErr.Limit.Reset.Format(time.RFC3339),
+		})
 		return
 	}
 
@@ -51,9 +64,48 @@ func writeError(w http.ResponseWriter, err error) {
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 }
 
+func classifyRateLimit(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var exhausted *github.AllTokensExhaustedError
+	if errors.As(err, &exhausted) {
+		resetAt := exhausted.ResetAt
+		return &model.GithubAPIError{
+			Msg:     "GitHub API rate limit exceeded across all configured tokens.",
+			Status:  http.StatusTooManyRequests,
+			ResetAt: &resetAt,
+			Err:     err,
+		}
+	}
+
+	return err
+}
+
+type CreateJobPayload struct {
+	Login string             `json:"login"`
+	Type  model.AudienceType `json:"type"`
+}
+
 func (s *Server) HandleCreateAudienceJob(w http.ResponseWriter, r *http.Request) {
-	login := r.URL.Query().Get("login")
-	audienceType := model.AudienceType(r.URL.Query().Get("type"))
+	var login string
+	var audienceType model.AudienceType
+
+	login = r.URL.Query().Get("login")
+	audienceType = model.AudienceType(r.URL.Query().Get("type"))
+
+	if login == "" || !audienceType.Valid() {
+		var payload CreateJobPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err == nil {
+			if login == "" {
+				login = payload.Login
+			}
+			if !audienceType.Valid() {
+				audienceType = payload.Type
+			}
+		}
+	}
 
 	if login == "" || !audienceType.Valid() || !model.ValidLogin(login) {
 		writeError(w, &model.GithubAPIError{Msg: "invalid login or type parameter", Status: http.StatusBadRequest})
@@ -64,7 +116,7 @@ func (s *Server) HandleCreateAudienceJob(w http.ResponseWriter, r *http.Request)
 	defer checkCancel()
 
 	if _, _, err := github.FetchUserProfile(checkCtx, s.GraphQL, s.Pool, login); err != nil {
-		writeError(w, err)
+		writeError(w, classifyRateLimit(err))
 		return
 	}
 
@@ -125,6 +177,10 @@ func (s *Server) HandleGetAudienceJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) HandleCancelAudienceJob(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("id")
 	if jobID == "" {
+		jobID = r.URL.Query().Get("id")
+	}
+
+	if jobID == "" {
 		writeError(w, &model.GithubAPIError{Msg: "job id required", Status: http.StatusBadRequest})
 		return
 	}
@@ -143,4 +199,39 @@ func (s *Server) HandleCancelAudienceJob(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusOK, job)
+}
+
+type UserProfileResponse struct {
+	Login          string  `json:"login"`
+	Name           *string `json:"name"`
+	AvatarURL      string  `json:"avatarUrl"`
+	URL            string  `json:"url"`
+	FollowersCount int     `json:"followersCount"`
+	FollowingCount int     `json:"followingCount"`
+}
+
+func (s *Server) HandleGetUser(w http.ResponseWriter, r *http.Request) {
+	login := r.URL.Query().Get("login")
+	if login == "" || !model.ValidLogin(login) {
+		writeError(w, &model.GithubAPIError{Msg: "invalid or missing login parameter", Status: http.StatusBadRequest})
+		return
+	}
+ 
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+ 
+	profile, _, err := github.FetchUserProfile(ctx, s.GraphQL, s.Pool, login)
+	if err != nil {
+		writeError(w, classifyRateLimit(err))
+		return
+	}
+ 
+	writeJSON(w, http.StatusOK, UserProfileResponse{
+		Login:          profile.ProfileNode.Login,
+		Name:           profile.ProfileNode.Name,
+		AvatarURL:      profile.ProfileNode.AvatarURL,
+		URL:            profile.ProfileNode.URL,
+		FollowersCount: profile.FollowersCount,
+		FollowingCount: profile.FollowingCount,
+	})
 }
